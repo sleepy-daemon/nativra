@@ -5,7 +5,9 @@ import { STYLE_PRESETS, THEME_PRESETS, getStylePreset, toCssVariables, toStyleCs
 import { TAILWIND_CONFIG_NAMES } from "./detect.js";
 import { assertSafeWriteTarget, fileExists, type LockFile } from "./install.js";
 
-const THEME_BLOCK = /\/\* NATIVRA THEME START: [\s\S]*?\/\* NATIVRA THEME END: .*?\*\//;
+// Back-reference `\1` pins the END marker to the SAME theme id that opened the block, so two
+// adjacent blocks each match themselves instead of a single lazy span collapsing them into one.
+const THEME_BLOCK = /\/\* NATIVRA THEME START: ([a-z0-9-]+) \*\/[\s\S]*?\/\* NATIVRA THEME END: \1 \*\//;
 
 /**
  * A slot is a file that exactly one item of a kind fills: the colors in theme.ts and the style in

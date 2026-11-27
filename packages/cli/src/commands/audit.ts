@@ -93,7 +93,8 @@ export async function managedDirs(cwd: string): Promise<string[]> {
 }
 
 function isManagedPath(relPath: string, dirs: string[]): boolean {
-  return dirs.some((d) => relPath.startsWith(`${d}/`) || relPath.includes(`/${d}/`));
+  // Anchor to the project root: a `/ui/` substring deep in an unrelated tree isn't managed.
+  return dirs.some((d) => relPath === d || relPath.startsWith(`${d}/`));
 }
 
 const TOUCHABLE_TAG = /<(TouchableOpacity|TouchableHighlight)\b/;
@@ -105,14 +106,21 @@ const RN_NAMED_IMPORT = /import\s*\{([^}]*)\}\s*from\s*["']react-native["']\s*;?
 const PRESS_OPACITY = 0.2;
 
 /**
- * Walks JSX source from `start`, skipping string literals and tracking `{}` depth, and returns
- * the first index where `stop(i, depth)` holds (depth already counts a `{` at i), or -1.
+ * Walks JSX source from `start`, skipping string literals and regex literals and tracking `{}`
+ * depth, and returns the first index where `stop(i, depth)` holds (depth already counts a `{` at
+ * i), or -1. Regex-literal recognition keeps a `{` or `}` inside `/.../` from miscounting depth,
+ * which would otherwise corrupt the scanner's end-of-tag or matching-brace position.
  */
 function scanJsx(text: string, start: number, stop: (i: number, depth: number) => boolean): number {
   let depth = 0;
   let quote: string | null = null;
+  // Last non-whitespace char seen; a `/` right after one of these starts a regex literal rather
+  // than a division operator. Keyword-starting contexts (return, typeof, in) don't show up in
+  // JSX attribute expressions in practice, so a single-char lookback is enough.
+  let prevNonWs = "";
+  const regexContext = (prev: string) => prev === "" || /[=({[,;!&|?:<>+\-*/%~^]/.test(prev);
   for (let i = start; i < text.length; i++) {
-    const c = text[i];
+    const c = text[i]!;
     if (quote) {
       if (c === "\\") i++;
       else if (c === quote) quote = null;
@@ -120,10 +128,41 @@ function scanJsx(text: string, start: number, stop: (i: number, depth: number) =
     }
     if (c === '"' || c === "'" || (c === "`" && depth > 0)) {
       quote = c;
+      prevNonWs = c;
       continue;
+    }
+    // Possible regex literal inside an expression (`depth > 0`); skip past its contents so `{`
+    // or `}` in the pattern (e.g. `/}/g`) can't move depth.
+    if (
+      c === "/" &&
+      depth > 0 &&
+      regexContext(prevNonWs) &&
+      text[i + 1] !== "/" &&
+      text[i + 1] !== "*"
+    ) {
+      let j = i + 1;
+      let inClass = false;
+      let closed = false;
+      while (j < text.length) {
+        const cj = text[j];
+        if (cj === "\n") break;
+        if (cj === "\\") { j += 2; continue; }
+        if (cj === "[") inClass = true;
+        else if (cj === "]") inClass = false;
+        else if (cj === "/" && !inClass) { closed = true; break; }
+        j++;
+      }
+      if (closed) {
+        while (j + 1 < text.length && /[gimsuvy]/.test(text[j + 1]!)) j++;
+        i = j;
+        prevNonWs = "/";
+        continue;
+      }
+      // Unterminated on this line: treat as division and fall through.
     }
     if (c === "{") depth++;
     else if (c === "}") depth--;
+    if (!/\s/.test(c)) prevNonWs = c;
     if (stop(i, depth)) return i;
   }
   return -1;
@@ -257,9 +296,41 @@ export async function applyLegacyTouchableFix(cwd: string, plan: FixResult): Pro
     plan.changed.map((c) => ({ destPath: c.file, exists: true }))
   );
   const previousHashes = new Map<string, string>();
-  for (const { file } of plan.changed) previousHashes.set(file, contentHash(await readFile(file, "utf8")));
-  for (const { file, content } of plan.changed) {
-    await writeFile(file, content, "utf8");
+  const previousContent = new Map<string, string>();
+  for (const { file } of plan.changed) {
+    const original = await readFile(file, "utf8");
+    previousContent.set(file, original);
+    previousHashes.set(file, contentHash(original));
+  }
+
+  // Mirror executeInstallTransaction: if a mid-loop write fails, restore every file we already
+  // rewrote so the project never holds a half-migrated state. The audit-fix backup still exists
+  // for manual rollback, but auto-restore here keeps the common failure path from needing it.
+  const written: string[] = [];
+  try {
+    for (const { file, content } of plan.changed) {
+      await writeFile(file, content, "utf8");
+      written.push(file);
+    }
+  } catch (err) {
+    const unrestored: string[] = [];
+    for (const file of written) {
+      try {
+        const original = previousContent.get(file);
+        if (original !== undefined) await writeFile(file, original, "utf8");
+      } catch {
+        unrestored.push(file);
+      }
+    }
+    if (unrestored.length > 0) {
+      throw new Error(
+        `audit --fix failed (${(err as Error).message}) and these files could not be restored: ${unrestored.join(", ")}. ` +
+          `Run: nativra rollback audit-fix`
+      );
+    }
+    throw new Error(
+      `audit --fix failed and project changes were safely rolled back: ${(err as Error).message}`
+    );
   }
   await refreshFixedLockHashes(cwd, plan, previousHashes);
   return plan.changed.length;
