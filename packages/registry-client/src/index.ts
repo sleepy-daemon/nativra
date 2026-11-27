@@ -38,7 +38,9 @@ function isLoopbackHttp(url: URL): boolean {
 }
 
 function isLoopbackHost(url: URL): boolean {
-  return url.hostname === "localhost" || url.hostname === "127.0.0.1";
+  // `URL` strips the surrounding brackets from an IPv6 host, so the ::1 check is done on the bare
+  // address. Still a local loopback, so a dev registry on IPv6-only localhost is allowed too.
+  return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "::1";
 }
 
 /**

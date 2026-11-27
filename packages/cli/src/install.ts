@@ -511,7 +511,21 @@ export async function executeInstallTransaction(
 
   const activePlan = plan.filter((p) => p.action !== "skip");
 
-  // Step 0: refuse symlinked targets before anything is written
+  // Step 0a: refuse a plan that writes the same destination twice. The second write would
+  // silently clobber the first, and `writtenFiles` would record only the last hash — the
+  // lockfile would then disagree with the content the first component intended to install.
+  const seenDest = new Set<string>();
+  for (const item of activePlan) {
+    if (seenDest.has(item.destPath)) {
+      throw new Error(
+        `Install plan writes "${item.destPath}" more than once (last owner: "${item.componentId}"). ` +
+          `Refusing to clobber the earlier write; fix the registry so no two items share this file.`
+      );
+    }
+    seenDest.add(item.destPath);
+  }
+
+  // Step 0b: refuse symlinked targets before anything is written
   for (const item of activePlan) await assertSafeWriteTarget(cwd, item.destPath);
 
   // Step 1: Snapshot previous states of files being changed
