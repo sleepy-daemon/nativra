@@ -13,7 +13,9 @@ export function toSource(location: string, name = "default", baseDir = process.c
     return { kind: "remote", location, name };
   }
   if (/^http:\/\//i.test(location)) {
-    if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(location)) {
+    // IPv6 localhost (`http://[::1]:N`) counts too: the URL parser normalizes the hostname to
+    // `::1`, which the registry client's redirect guard accepts for loopback.
+    if (/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(location)) {
       return { kind: "remote", location, name };
     }
     throw new Error(

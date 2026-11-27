@@ -233,10 +233,17 @@ export async function detectImportAlias(cwd: string): Promise<ImportAlias | null
 /**
  * Import specifier for a project-relative directory under the given alias, or null if the
  * directory is outside the alias base (it cannot be imported through that alias).
+ * Windows filesystems are case-insensitive, so the baseDir comparison is lower-cased there;
+ * the returned alias keeps the directory's own casing after the baseDir prefix.
  */
 export function aliasForDir(alias: ImportAlias, dir: string): string | null {
   const clean = dir.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
   if (!alias.baseDir) return `${alias.prefix}${clean}`;
-  if (!clean.startsWith(`${alias.baseDir}/`)) return null;
-  return `${alias.prefix}${clean.slice(alias.baseDir.length + 1)}`;
+  const needle = `${alias.baseDir}/`;
+  const startsWith =
+    process.platform === "win32"
+      ? clean.toLowerCase().startsWith(needle.toLowerCase())
+      : clean.startsWith(needle);
+  if (!startsWith) return null;
+  return `${alias.prefix}${clean.slice(needle.length)}`;
 }

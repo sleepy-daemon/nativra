@@ -89,6 +89,15 @@ export function registerThemeCommand(program: Command) {
             ? join(resolveDestDir(options.cwd, item, config), `${customName}.ts`)
             : destPathFor(options.cwd, item, file, config);
 
+          // Verify the destination is safe before reading it: `createBackup` would otherwise
+          // follow a symlinked dest to read its content into `.nativra/backups/`.
+          try {
+            await assertSafeWriteTarget(options.cwd, dest);
+          } catch (err) {
+            console.error(chalk.red(`\n✗ ${(err as Error).message}\n`));
+            process.exit(1);
+          }
+
           if (await fileExists(dest)) {
             let overwrite = Boolean(options.overwrite);
             if (!overwrite && process.stdin.isTTY) {
@@ -113,12 +122,6 @@ export function registerThemeCommand(program: Command) {
               process.exit(1);
             }
             undoHints.add(owner);
-          }
-          try {
-            await assertSafeWriteTarget(options.cwd, dest);
-          } catch (err) {
-            console.error(chalk.red(`\n✗ ${(err as Error).message}\n`));
-            process.exit(1);
           }
           writes[dest] = await writeInstalledFile(dest, renderFile(options.cwd, item, file, [item], config));
           console.log(chalk.green(`  ✓ Written: ${dest}`));
@@ -191,6 +194,8 @@ export function registerStyleCommand(program: Command) {
       for (const file of filesForTarget(item, config)) {
         const dest = destPathFor(options.cwd, item, file, config);
         try {
+          // Safety check comes first so a symlinked dest fails before `createBackup` would
+          // otherwise follow the symlink reading its content into `.nativra/backups/`.
           await assertSafeWriteTarget(options.cwd, dest);
           if (await fileExists(dest)) {
             // Switching styles is the point of this command, so the old file is backed up, not kept.

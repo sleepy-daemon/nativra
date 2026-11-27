@@ -8,6 +8,11 @@ import { assertSafeWriteTarget, fileExists, type LockFile } from "./install.js";
 // Back-reference `\1` pins the END marker to the SAME theme id that opened the block, so two
 // adjacent blocks each match themselves instead of a single lazy span collapsing them into one.
 const THEME_BLOCK = /\/\* NATIVRA THEME START: ([a-z0-9-]+) \*\/[\s\S]*?\/\* NATIVRA THEME END: \1 \*\//;
+// The same pattern with the global flag, used only by `applyThemeCss` to sweep every block so a
+// stray second block (merge conflict, hand edit) is removed instead of left behind to override
+// the refreshed one. Kept separate because `.test`/`.exec` on a /g regex keep `lastIndex` state,
+// which the other callers mustn't share.
+const THEME_BLOCK_GLOBAL = /\/\* NATIVRA THEME START: ([a-z0-9-]+) \*\/[\s\S]*?\/\* NATIVRA THEME END: \1 \*\//g;
 
 /**
  * A slot is a file that exactly one item of a kind fills: the colors in theme.ts and the style in
@@ -117,9 +122,11 @@ export async function applyThemeCss(cwd: string, id: string, styleId?: string): 
     const style = getStylePreset(styleId);
     // Style classes sit outside @layer so Tailwind emits them as written (never purged).
     const block = `/* NATIVRA THEME START: ${id} */\n@layer base {\n${toCssVariables(tokens)}\n}\n${toStyleCss(tokens, style)}\n/* NATIVRA THEME END: ${id} */`;
-    const updatedCss = THEME_BLOCK.test(existingCss)
-      ? existingCss.replace(THEME_BLOCK, () => block)
-      : `${existingCss.trimEnd()}\n\n${block}\n`;
+    // Replace the first block with the new one, strip any further blocks: the project ends up
+    // with exactly one Nativra theme block, so later `@layer base` wins without stale overrides.
+    let seen = 0;
+    const replaced = existingCss.replace(THEME_BLOCK_GLOBAL, () => (seen++ === 0 ? block : ""));
+    const updatedCss = seen > 0 ? replaced : `${existingCss.trimEnd()}\n\n${block}\n`;
     await writeFile(await assertSafeWriteTarget(cwd, targetCss), updatedCss, "utf8");
     console.log(chalk.green(`  ✓ Wrote the "${id}" theme with the "${style.id}" style into ${targetCss}`));
     return true;

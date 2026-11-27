@@ -41,6 +41,20 @@ export const SHA256_HEX_REGEX = /^[a-f0-9]{64}$/i;
 export const REGISTRY_NAME_REGEX = /^[a-z0-9][a-z0-9-]*$/;
 export const NO_CONTROL_CHARS_REGEX = /^[^\u0000-\u001f\u007f-\u009f]*$/;
 
+/**
+ * Registry source file paths are relative within the installed location. A path is safe when it
+ * has no null bytes, no `..` segments, no absolute POSIX prefix, no leading `\`, and no
+ * drive-letter prefix (`C:`, `c:`). Enforced at the schema so every consumer of RegistryItem
+ * gets containment, not just CLI-side callers.
+ */
+export function isSafeRegistryPath(input: string): boolean {
+  if (typeof input !== "string" || input.length === 0) return false;
+  if (input.includes("\0")) return false;
+  if (/^[a-zA-Z]:/.test(input)) return false;
+  if (input.startsWith("/") || input.startsWith("\\")) return false;
+  return !input.split(/[/\\]/).includes("..");
+}
+
 // ---------------------------------------------------------------------------
 // Accessibility metadata contract (V4 §3 & §15)
 // ---------------------------------------------------------------------------
@@ -110,11 +124,18 @@ export type RegistryDependency = z.infer<typeof RegistryDependencySchema>;
 export const SourceFileSchema = z.object({
   /**
    * Relative path within the installed location, e.g. "components/ui/Button.tsx". Control
-   * characters are rejected: the CLI prints paths, so they could carry terminal escape sequences.
+   * characters are rejected (the CLI prints paths, so they could carry terminal escape
+   * sequences), and so are traversal segments, absolute paths and Windows drive letters so the
+   * schema itself guarantees the path stays inside the install directory.
    */
-  path: z.string().min(1).max(260).regex(NO_CONTROL_CHARS_REGEX, {
-    message: "Path must not contain control characters",
-  }),
+  path: z
+    .string()
+    .min(1)
+    .max(260)
+    .regex(NO_CONTROL_CHARS_REGEX, { message: "Path must not contain control characters" })
+    .refine(isSafeRegistryPath, {
+      message: "Path must be a safe relative path within the install location (no '..', absolute paths, or drive letters)",
+    }),
   /** Styling target this file is for */
   target: StylingTargetSchema.optional(),
   /** Raw source content (populated during build) */
@@ -247,20 +268,58 @@ export interface CompatibilityMatrix {
   ios: { minDeploymentTarget: string };
 }
 
-/** Extracts [major, minor, patch] from a version or simple range ("^0.76.3", "~52.0.0", "0.100"). */
-export function parseVersion(input: string): [number, number, number] | null {
-  const match = input.match(/(\d+)(?:\.(\d+))?(?:\.(\d+))?/);
+/**
+ * Parsed semver: [major, minor, patch, prerelease]. `prerelease` is the raw suffix text after
+ * `-` (e.g. "beta.1" for `1.0.0-beta.1`), or null for a release build. SemVer orders pre-release
+ * below release at the same base, so the null is comparison-higher than any string.
+ */
+export type ParsedVersion = [number, number, number, string | null];
+
+/** Extracts a parsed version from a version or simple range ("^0.76.3", "~52.0.0", "0.100", "1.0.0-beta.1"). */
+export function parseVersion(input: string): ParsedVersion | null {
+  const match = input.match(/(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?/);
   if (!match) return null;
-  return [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)];
+  return [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0), match[4] ?? null];
+}
+
+/**
+ * Compares a pre-release identifier list ("beta.1") by SemVer §11: numeric identifiers compare
+ * numerically, alphanumeric compare lexically, numeric < alphanumeric, and a longer run outranks
+ * a shorter one when every shared identifier matches.
+ */
+function comparePrerelease(a: string, b: string): number {
+  const ap = a.split(".");
+  const bp = b.split(".");
+  const len = Math.max(ap.length, bp.length);
+  for (let i = 0; i < len; i++) {
+    const x = ap[i];
+    const y = bp[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    const xn = /^\d+$/.test(x) ? Number(x) : null;
+    const yn = /^\d+$/.test(y) ? Number(y) : null;
+    if (xn !== null && yn !== null) {
+      if (xn !== yn) return xn - yn;
+      continue;
+    }
+    if (xn !== null) return -1;
+    if (yn !== null) return 1;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
 }
 
 /** Numeric semver comparison: negative if a < b, 0 if equal, positive if a > b. */
-export function compareVersions(a: [number, number, number], b: [number, number, number]): number {
+export function compareVersions(a: ParsedVersion, b: ParsedVersion): number {
   for (let i = 0; i < 3; i++) {
-    const diff = a[i]! - b[i]!;
+    const diff = (a[i] as number) - (b[i] as number);
     if (diff !== 0) return diff;
   }
-  return 0;
+  // Pre-release sorts lower than release: `1.0.0-beta` < `1.0.0`.
+  if (a[3] === null && b[3] === null) return 0;
+  if (a[3] === null) return 1;
+  if (b[3] === null) return -1;
+  return comparePrerelease(a[3], b[3]);
 }
 
 /** Minimums are what the registry supports; "tested" lists what the examples and preview app run (Expo SDK 58 since 0.3). */
