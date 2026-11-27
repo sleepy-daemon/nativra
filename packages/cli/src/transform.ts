@@ -58,6 +58,8 @@ function inferAliasBase(config: NativraConfig, prefix: string): string | null {
     [config.aliases?.utils, config.utilsDir.replace(/\.(ts|js|tsx)$/, "")],
     [config.aliases?.hooks, config.hooksDir],
     [config.aliases?.components, config.componentsDir],
+    [config.aliases?.blocks, config.blocksDir ?? config.componentsDir],
+    [config.aliases?.themes, config.themesDir],
   ];
   for (const [alias, dir] of pairs) {
     if (!alias?.startsWith(prefix)) continue;

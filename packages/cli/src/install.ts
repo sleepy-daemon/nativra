@@ -1,4 +1,5 @@
 import { access, lstat, mkdir, readFile, readdir, writeFile, rename, rm } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { RegistryItem, SourceFile } from "@nativra/registry-schema";
 import { sha256 } from "@nativra/utils";
@@ -329,12 +330,19 @@ export function emptyLock(): LockFile {
 /** Atomic lockfile writer using temporary file and atomic rename (Plan Section 3.6) */
 export async function writeLock(cwd: string, lock: LockFile): Promise<void> {
   const targetPath = await assertSafeWriteTarget(cwd, LOCK_FILENAME);
-  const tmpPath = await assertSafeWriteTarget(cwd, `.${LOCK_FILENAME}.${Date.now()}.tmp`);
+  // Random suffix so two concurrent writers in the same millisecond don't pick the same tmp path
+  // and clobber each other's partial content.
+  const tmpName = `.${LOCK_FILENAME}.${Date.now()}.${randomBytes(6).toString("hex")}.tmp`;
+  const tmpPath = await assertSafeWriteTarget(cwd, tmpName);
   await writeFile(tmpPath, JSON.stringify(lock, null, 2), "utf8");
   try {
     await rename(tmpPath, targetPath);
-  } catch {
-    // Fallback on environments where atomic rename is locked
+  } catch (err) {
+    // Fallback on environments where atomic rename is locked; surface the original error so the
+    // loss of atomicity is traceable.
+    console.error(
+      `⚠ Atomic rename of ${LOCK_FILENAME} failed (${(err as Error).message}); falling back to non-atomic write.`
+    );
     await writeFile(targetPath, JSON.stringify(lock, null, 2), "utf8");
     await rm(tmpPath, { force: true }).catch(() => {});
   }
@@ -446,7 +454,9 @@ export async function discardBackup(cwd: string, backupId: string): Promise<void
   }
   const componentDir = backupDirFor(cwd, componentId);
   const snapshotDir = assertChildOfRoot(componentDir, join(componentDir, snapshot), "backup snapshot");
-  await assertNotSymlink(snapshotDir);
+  // Walk every segment, not just the leaf: `.nativra/` or `.nativra/backups/` could be swapped for
+  // a symlink after the snapshot was created, and rm follows symlinks in intermediate dirs.
+  await assertSafeWriteTarget(cwd, snapshotDir);
   await rm(snapshotDir, { recursive: true, force: true });
 }
 
